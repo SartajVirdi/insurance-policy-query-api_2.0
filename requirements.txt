@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-google-generativeai
-sentence-transformers
-PyPDF2
-python-multipart
+cohere
+chromadb
+PyMuPDF
