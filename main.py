@@ -1,62 +1,68 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List
-import tempfile
 import os
-import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
-from PyPDF2 import PdfReader
+import fitz  # PyMuPDF
+import cohere
+import chromadb
+from fastapi import FastAPI, Query
+from pydantic import BaseModel
+from chromadb.config import Settings
+from chromadb.utils.embedding_functions import CohereEmbeddingFunction
 
-# === CONFIGURATION ===
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Set this in Render environment variables
-assert GEMINI_API_KEY, "Missing Gemini API key"
+# === CONFIG ===
+COHERE_API_KEY = os.getenv("COHERE_API_KEY") or "your-cohere-key"
+POLICY_FOLDER = "policies"
+COLLECTION_NAME = "insurance_policies"
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-pro")
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
-
-# === FASTAPI APP ===
+# === INIT ===
+co = cohere.Client(COHERE_API_KEY)
+chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
+embedder = CohereEmbeddingFunction(api_key=COHERE_API_KEY)
+collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME, embedding_function=embedder)
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# === HELPERS ===
-def extract_text_from_pdf(file: UploadFile) -> str:
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp.write(file.file.read())
-        tmp_path = tmp.name
-    reader = PdfReader(tmp_path)
-    text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-    os.unlink(tmp_path)
-    return text
+# === LOAD PDFs ===
+def load_pdfs(folder_path):
+    texts = []
+    for file in os.listdir(folder_path):
+        if file.endswith(".pdf"):
+            doc = fitz.open(os.path.join(folder_path, file))
+            for i, page in enumerate(doc):
+                text = page.get_text()
+                if text.strip():
+                    texts.append({
+                        "id": f"{file}-{i}",
+                        "text": text,
+                        "metadata": {"source": file, "page": i}
+                    })
+    return texts
 
-def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
-    words = text.split()
-    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+# === INGEST ===
+def ingest():
+    all_chunks = load_pdfs(POLICY_FOLDER)
+    ids, docs, meta = [], [], []
+    for chunk in all_chunks:
+        ids.append(chunk["id"])
+        docs.append(chunk["text"])
+        meta.append(chunk["metadata"])
+    collection.add(documents=docs, metadatas=meta, ids=ids)
 
-def find_relevant_chunks(chunks: List[str], query: str, top_k: int = 3) -> List[str]:
-    query_embedding = embedder.encode(query)
-    chunk_embeddings = embedder.encode(chunks)
-    scores = [(i, float(np.dot(query_embedding, emb))) for i, emb in enumerate(chunk_embeddings)]
-    scores.sort(key=lambda x: x[1], reverse=True)
-    return [chunks[i] for i, _ in scores[:top_k]]
+# === RUN ON STARTUP ===
+ingest()
 
-# === ROUTES ===
+# === QUERY ENDPOINT ===
+class QueryRequest(BaseModel):
+    question: str
+
 @app.post("/ask")
-async def ask_question(file: UploadFile = File(...), query: str = ""):
-    raw_text = extract_text_from_pdf(file)
-    chunks = chunk_text(raw_text)
-    relevant_chunks = find_relevant_chunks(chunks, query)
-    context = "\n".join(relevant_chunks)
-    prompt = f"Answer the question using the context below.\n\nContext:\n{context}\n\nQuestion: {query}"
+def ask_qna(req: QueryRequest):
+    query_embed = embedder.embed_query(req.question)
+    results = collection.query(query_embeddings=[query_embed], n_results=3)
 
-    try:
-        response = model.generate_content(prompt)
-        return {"answer": response.text.strip()}
-    except Exception as e:
-        return {"error": str(e)}
+    context = "\n".join(results["documents"][0])
+    prompt = f"Answer the question based on the context:\nContext: {context}\nQuestion: {req.question}\nAnswer:"
+
+    response = co.generate(prompt=prompt, max_tokens=200)
+    return {"answer": response.generations[0].text.strip()}
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
