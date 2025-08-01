@@ -1,11 +1,8 @@
 flask
 torch
 transformers
-einops
-accelerate
-sentence-transformers
+bitsandbytes
 llama-index
 llama-index-llms-huggingface
 llama-index-embeddings-huggingface
 huggingface_hub
-pypdf
