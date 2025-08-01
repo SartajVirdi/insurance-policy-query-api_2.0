@@ -1,8 +1,6 @@
 fastapi
 uvicorn
-llama-index
-llama-index-llms-google
-llama-index-embeddings-huggingface
+google-generativeai
 sentence-transformers
-pypdf
+PyPDF2
 python-multipart
