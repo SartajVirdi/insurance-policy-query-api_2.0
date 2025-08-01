@@ -1,21 +1,22 @@
-#  LLM-Powered Insurance Document Query System
+#  Insurance Policy Query API (Falcon-7B + LlamaIndex)
 
-This project is built for **HackRx 6.0** and allows users to ask natural language questions (like insurance claims) and receive structured decisions extracted from complex documents such as health policies.
+This project enables intelligent querying of insurance policy documents using the **Falcon-7B-Instruct** large language model and `llama-index`. It was developed for **HackRx 6.0** to assist users in getting structured, clause-based answers from unstructured PDF documents such as health insurance policies.
 
 ---
 
-##  API Endpoint
+##  Features
 
-**POST** `/api/v1/hackrx/run`
+-  Natural language question answering over PDFs
+-  Uses open-source **Falcon-7B-Instruct** model
+-  Cites specific clauses from policy documents
+-  Supports multiple documents
+-  Query response in **JSON** (decision + reason + reference)
 
-###  Request Format
+---
+
+##  Sample Queries
 
 ```json
 {
-  "query": "46M, knee surgery, Pune, 3-month policy",
-  "chunks": [
-    "Bajaj Allianz provides coverage for knee surgery after 90 days of policy activation.",
-    "Applicable to males aged 18–60 across major cities including Pune.",
-    "Day-care procedures and hospitalizations are included under the Gold Health Plan."
-  ]
+  "query": "A 46-year-old male had knee surgery in Pune. His policy is 3 months old. Is he eligible for a claim?"
 }
