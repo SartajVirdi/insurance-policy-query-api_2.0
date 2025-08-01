@@ -1,8 +1,11 @@
-transformers
+flask
 torch
+transformers
+einops
 accelerate
-bitsandbytes
-llama-index
 sentence-transformers
-PyMuPDF
+llama-index
+llama-index-llms-huggingface
+llama-index-embeddings-huggingface
 huggingface_hub
+pypdf
