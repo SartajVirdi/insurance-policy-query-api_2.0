@@ -1,89 +1,47 @@
-from flask import Flask, request, jsonify
-import fitz  # PyMuPDF
-import faiss
-import numpy as np
 import os
-import re
-import glob
-from sentence_transformers import SentenceTransformer
-import cohere
+from fastapi import FastAPI, UploadFile, File
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.google import Gemini
+from pydantic import BaseModel
+from typing import List
+import shutil
 
-app = Flask(__name__)
+# Init FastAPI
+app = FastAPI()
 
-# ✅ Load embedding model (lightweight)
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+# Set up Gemini LLM
+Settings.llm = Gemini(api_key=os.getenv("GOOGLE_API_KEY"))
+Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# ✅ Optionally, load Cohere (hosted LLM)
-co = cohere.Client(os.getenv("COHERE_API_KEY"))
+# Document folder
+DOCS_DIR = "policies"
+os.makedirs(DOCS_DIR, exist_ok=True)
 
-# ✅ Load and combine all PDFs from the 'policies/' folder
-def load_all_pdfs(folder="policies"):
-    combined_text = ""
-    for filepath in glob.glob(os.path.join(folder, "*.pdf")):
-        doc = fitz.open(filepath)
-        for page in doc:
-            combined_text += page.get_text() + "\n"
-    return combined_text
+# Load existing documents
+def load_index():
+    documents = SimpleDirectoryReader(DOCS_DIR).load_data()
+    return VectorStoreIndex.from_documents(documents)
 
-# ✅ Smarter chunking with larger context and overlap
-def split_text(text, max_tokens=400, overlap=100):
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    chunks = []
-    chunk = []
-    tokens = 0
-    for sentence in sentences:
-        sentence_tokens = len(sentence.split())
-        if tokens + sentence_tokens <= max_tokens:
-            chunk.append(sentence)
-            tokens += sentence_tokens
-        else:
-            chunks.append(" ".join(chunk))
-            chunk = chunk[-(overlap//5):] + [sentence]  # maintain overlap
-            tokens = sum(len(s.split()) for s in chunk)
-    if chunk:
-        chunks.append(" ".join(chunk))
-    return chunks
+index = load_index()
+query_engine = index.as_query_engine()
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    if not data or "query" not in data:
-        return jsonify({"error": "Query field missing"}), 400
+# Request schema
+class QueryRequest(BaseModel):
+    question: str
 
-    query = data["query"]
+# Routes
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    file_path = os.path.join(DOCS_DIR, file.filename)
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    global index, query_engine
+    index = load_index()
+    query_engine = index.as_query_engine()
+    return {"status": "uploaded", "filename": file.filename}
 
-    try:
-        text = load_all_pdfs()
-    except Exception as e:
-        return jsonify({"error": f"Failed to load PDFs: {e}"}), 500
-
-    chunks = split_text(text)
-    try:
-        embeddings = embedder.encode(chunks)
-    except Exception as e:
-        return jsonify({"error": f"Embedding error: {e}"}), 500
-
-    index = faiss.IndexFlatL2(embeddings[0].shape[0])
-    index.add(np.array(embeddings))
-
-    try:
-        query_embed = embedder.encode([query])[0]
-        D, I = index.search(np.array([query_embed]), k=5)
-        retrieved = [chunks[i] for i in I[0]]
-    except Exception as e:
-        return jsonify({"error": f"Search error: {e}"}), 500
-
-    context = "\n".join(retrieved)
-
-    try:
-        response = co.chat(
-            model='command-r-plus',
-            message=query,
-            documents=[{"text": context}]
-        )
-        return jsonify({"response": response.text.strip()})
-    except Exception as e:
-        return jsonify({"error": f"LLM response error: {e}"}), 500
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+@app.post("/query")
+async def query_docs(request: QueryRequest):
+    response = query_engine.query(request.question)
+    return {"answer": str(response)}
