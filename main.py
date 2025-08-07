@@ -1,68 +1,69 @@
-import os
-import fitz  # PyMuPDF
-import cohere
-import chromadb
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from pydantic import BaseModel
-from chromadb.config import Settings
-from chromadb.utils.embedding_functions import CohereEmbeddingFunction
+from typing import List
+import requests
+import fitz  # PyMuPDF
+import os
 
-# === CONFIG ===
-COHERE_API_KEY = os.getenv("COHERE_API_KEY") or "your-cohere-key"
-POLICY_FOLDER = "policies"
-COLLECTION_NAME = "insurance_policies"
-
-# === INIT ===
-co = cohere.Client(COHERE_API_KEY)
-chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
-embedder = CohereEmbeddingFunction(api_key=COHERE_API_KEY)
-collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME, embedding_function=embedder)
 app = FastAPI()
 
-# === LOAD PDFs ===
-def load_pdfs(folder_path):
-    texts = []
-    for file in os.listdir(folder_path):
-        if file.endswith(".pdf"):
-            doc = fitz.open(os.path.join(folder_path, file))
-            for i, page in enumerate(doc):
-                text = page.get_text()
-                if text.strip():
-                    texts.append({
-                        "id": f"{file}-{i}",
-                        "text": text,
-                        "metadata": {"source": file, "page": i}
-                    })
-    return texts
+# Make sure this env variable is set in your deployment platform (e.g. Render)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# === INGEST ===
-def ingest():
-    all_chunks = load_pdfs(POLICY_FOLDER)
-    ids, docs, meta = [], [], []
-    for chunk in all_chunks:
-        ids.append(chunk["id"])
-        docs.append(chunk["text"])
-        meta.append(chunk["metadata"])
-    collection.add(documents=docs, metadatas=meta, ids=ids)
+class HackRxRequest(BaseModel):
+    documents: str  # PDF URL
+    questions: List[str]
 
-# === RUN ON STARTUP ===
-ingest()
+class HackRxResponse(BaseModel):
+    answers: List[str]
 
-# === QUERY ENDPOINT ===
-class QueryRequest(BaseModel):
-    question: str
+# --- PDF text extractor ---
+def extract_text_from_pdf_url(url: str) -> str:
+    try:
+        pdf_bytes = requests.get(url).content
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        return "\n".join(page.get_text() for page in doc)
+    except Exception as e:
+        raise RuntimeError(f"PDF extraction failed: {e}")
 
-@app.post("/ask")
-def ask_qna(req: QueryRequest):
-    query_embed = embedder.embed_query(req.question)
-    results = collection.query(query_embeddings=[query_embed], n_results=3)
+# --- Gemini API call ---
+def ask_gemini(question: str, context: str) -> str:
+    endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY,
+    }
 
-    context = "\n".join(results["documents"][0])
-    prompt = f"Answer the question based on the context:\nContext: {context}\nQuestion: {req.question}\nAnswer:"
+    # Optimized prompt
+    prompt = (
+        f"Using only the information from the following insurance policy document, "
+        f"answer the question briefly and clearly.\n\n"
+        f"Document:\n{context[:20000]}\n\n"
+        f"Question: {question}"
+    )
 
-    response = co.generate(prompt=prompt, max_tokens=200)
-    return {"answer": response.generations[0].text.strip()}
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ]
+    }
 
-@app.get("/")
-def health():
-    return {"status": "ok"}
+    try:
+        res = requests.post(endpoint, headers=headers, json=payload)
+        res.raise_for_status()
+        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        return f"Gemini API error: {e}"
+
+# --- Main endpoint ---
+@app.post("/hackrx/run", response_model=HackRxResponse)
+def run_pipeline(data: HackRxRequest):
+    try:
+        full_text = extract_text_from_pdf_url(data.documents)
+    except Exception as e:
+        return {"answers": [f"Failed to extract PDF: {e}"] * len(data.questions)}
+    
+    answers = [ask_gemini(q, full_text) for q in data.questions]
+    return {"answers": answers}
