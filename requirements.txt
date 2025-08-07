@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-cohere
-chromadb
+requests
 PyMuPDF
-pillow
+pydantic
